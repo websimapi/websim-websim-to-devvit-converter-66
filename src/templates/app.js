@@ -9,7 +9,8 @@ import {
     getServerPort, 
     redis, 
     reddit,
-    realtime
+    realtime,
+    payments
 } from '@devvit/web/server';
 import { addPaymentHandler } from '@devvit/payments';
 
@@ -138,15 +139,14 @@ router.get('/api/payments/history', async (req, res) => {
         const userId = context.userId;
         if (!userId) return res.json({ purchases: [] });
 
-        // Get all historical orders for this user
-        // Note: In Devvit Web, context.payments provides getOrders
-        const orders = await context.payments.getOrders({
+        // Get all historical orders for this user using the server payments SDK
+        const orders = await payments.getOrders({
             userId: userId
         });
 
-        const successfulSkus = orders
-            .filter(o => o.status === 'PAID')
-            .flatMap(o => o.products.map(p => p.sku));
+        const successfulSkus = (orders || [])
+            .filter(o => o && o.status === 'PAID')
+            .flatMap(o => (o.products || []).map(p => p.sku));
 
         res.json({ purchases: successfulSkus });
     } catch (e) {
@@ -238,9 +238,9 @@ router.post('/internal/payments/fulfill', async (req, res) => {
             return res.status(400).json({ success: false, reason: "Invalid or missing order data" });
         }
 
-        console.log(\`[Server] Fulfillment Received: ID=\${order.id} Status=\${order.status}\`);
+        console.log(\`[Server] Fulfillment Received: ID=\${order?.id || 'unknown'} Status=\${order?.status || 'unknown'}\`);
 
-        if (order.status === 'PAID') {
+        if (order && order.status === 'PAID') {
             const product = order.products && order.products[0];
             const sku = product ? product.sku : '';
             
