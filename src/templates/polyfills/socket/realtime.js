@@ -253,8 +253,8 @@ export const socketRealtime = `
                 }
             }
             else if (type === '_ws_event') {
+                // 1. Generic Message Listeners (window.party.onmessage)
                 if (this.listeners.message) {
-                    // Reconstruct WebSim event shape
                     const evt = {
                         data: {
                             ...data.data,
@@ -263,6 +263,14 @@ export const socketRealtime = `
                         }
                     };
                     this.listeners.message(evt);
+                }
+
+                // 2. Specialized Comment Event Listeners (websim.addEventListener)
+                if (data.data && data.data.type === 'comment:created') {
+                    const listeners = window._websim_comment_listeners || [];
+                    listeners.forEach(cb => {
+                        try { cb(data.data); } catch(e) {}
+                    });
                 }
             }
         }

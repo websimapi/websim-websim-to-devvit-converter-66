@@ -175,11 +175,16 @@ router.get('/api/identity', async (_req, res) => {
 // Intent endpoint to capture comment content BEFORE purchase
 router.post('/api/payments/intent', async (req, res) => {
     try {
-        const { content, credits } = req.body;
+        const { content, credits, username } = req.body;
         const { userId, postId } = context;
         if (!userId || !postId) return res.status(401).json({ error: 'Unauthorized' });
         
-        await redis.set(\`pending_tip:\${postId}:\${userId}\`, JSON.stringify({ content, credits }), { ex: 600 });
+        // Cache the intent for 10 mins - this allows the fulfillment worker to find the custom comment
+        await redis.set(\`pending_tip:\${postId}:\${userId}\`, JSON.stringify({ 
+            content, 
+            credits, 
+            username: username || context.username 
+        }), { ex: 600 });
         res.json({ ok: true });
     } catch(e) {
         res.status(500).json({ error: e.message });
@@ -244,22 +249,40 @@ async function handleOrderFulfillment(order, ctx) {
     if (amount > 0 && userId && postId) {
         console.log(\`[Server] Processing Tip: \${amount} Gold from \${userId} on \${postId}\`);
         
-        // 1. Update Per-User Running Total (Redis source of truth)
+        // 1. Update Per-User Running Total (Redis source of truth for rewards tiers)
         const tipKey = \`tips:\${postId}:\${userId}\`;
         await redis.incrBy(tipKey, amount);
 
-        // 2. Automated Thank You Comment
+        // 2. Retrieve custom comment content from Intent Registry
+        let commentText = \`**Tipped \${amount} Gold!** 🟡\\n\\n*(Verified Transaction)*\`;
+        let authorUsername = 'RedditUser';
+        
+        try {
+            const intentRaw = await redis.get(\`pending_tip:\${postId}:\${userId}\`);
+            if (intentRaw) {
+                const intent = JSON.parse(intentRaw);
+                if (intent.content) {
+                    commentText = \`\${intent.content}\\n\\n---\\n*Verified Tip: \${amount} Gold* 🟡\`;
+                }
+                if (intent.username) authorUsername = intent.username;
+                await redis.del(\`pending_tip:\${postId}:\${userId}\`);
+            }
+        } catch(e) { console.warn("[Server] Intent retrieval failed:", e); }
+
+        // 3. Automated Thank You Comment
         try {
             const comment = await reddit.submitComment({
                 id: postId,
-                text: \`**Tipped \${amount} Gold!** 🟡\\n\\n*(Verified Transaction)*\`
+                text: commentText
             });
             
-            // 3. Register the comment as a tip in Redis registry
+            // 4. Register the comment as a tip in Redis registry for scraper/calculator
             const registryKey = \`tips_registry:\${postId}\`;
             const meta = JSON.stringify({
                 comment_id: comment.id,
                 user_id: userId,
+                username: authorUsername,
+                content: commentText,
                 amount: amount,
                 timestamp: Date.now()
             });
@@ -270,8 +293,25 @@ async function handleOrderFulfillment(order, ctx) {
                 type: 'tip_comment',
                 credits_spent: String(amount)
             });
+
+            // 5. Broadcast Realtime Event so game UI updates instantly without polling
+            await realtime.send('global_room', {
+                type: '_ws_event',
+                data: {
+                    type: 'comment:created',
+                    comment: {
+                        id: comment.id,
+                        project_id: 'local',
+                        raw_content: commentText,
+                        author: { id: userId, username: authorUsername, avatar_url: '/_websim_avatar_/' + authorUsername },
+                        created_at: new Date().toISOString(),
+                        card_data: { type: 'tip_comment', credits_spent: amount }
+                    }
+                }
+            });
+
         } catch(err) {
-            console.warn('Failed to post tip comment:', err);
+            console.warn('Failed to post tip comment/broadcast:', err);
         }
     }
 }
@@ -369,7 +409,7 @@ router.get('/api/comments', async (req, res) => {
             };
         }));
 
-        // 4. Inject Virtual Tips (Transactions that might be missing from the current page of comments)
+        // 4. Inject Virtual Tips (Transactions that might be missing from the current page of comments due to Reddit API latency)
         if (onlyTips) {
             const existingIds = new Set(data.filter(Boolean).map(item => item.comment.id));
             registeredTips.forEach(tip => {
@@ -378,8 +418,12 @@ router.get('/api/comments', async (req, res) => {
                         comment: {
                             id: tip.comment_id,
                             project_id: 'local',
-                            raw_content: \`**Tipped \${tip.amount} Gold!** 🟡\`,
-                            author: { id: tip.user_id, username: 'RedditUser', avatar_url: '/_websim_avatar_/unknown' },
+                            raw_content: tip.content || \`**Tipped \${tip.amount} Gold!** 🟡\`,
+                            author: { 
+                                id: tip.user_id, 
+                                username: tip.username || 'RedditUser', 
+                                avatar_url: '/_websim_avatar_/' + (tip.username || 'unknown') 
+                            },
                             created_at: new Date(tip.timestamp).toISOString(),
                             card_data: { type: 'tip_comment', credits_spent: tip.amount }
                         }

@@ -136,12 +136,15 @@ export const websimStubsJs = `
                                 }
 
                                 // Hotswap: Register tip intent BEFORE purchase so server can link content to transaction
+                                // We include the username to ensure the fulfillment worker knows who to thank
+                                const user = await window.websim.getCurrentUser();
                                 await originalFetch('/api/payments/intent', {
                                     method: 'POST',
                                     headers: { 'Content-Type': 'application/json' },
                                     body: JSON.stringify({
                                         content: data.content || '',
-                                        credits: tier
+                                        credits: tier,
+                                        username: user.username
                                     })
                                 }).catch(e => console.warn("[Polyfill] Tip intent failed (non-fatal):", e));
 
