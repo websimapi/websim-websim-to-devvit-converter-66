@@ -147,17 +147,7 @@ export const websimStubsJs = `
                                         detail: { sku, credits: tier } 
                                     }));
 
-                                    // If there was also a custom comment body, post it now
-                                    if (data.content && data.content.trim() && !data.content.includes('Tipped')) {
-                                        await originalFetch('/api/comments', {
-                                            method: 'POST',
-                                            headers: { 'Content-Type': 'application/json' },
-                                            body: JSON.stringify({
-                                                content: data.content,
-                                                parentId: data.parent_comment_id
-                                            })
-                                        });
-                                    }
+                                    // Note: Content is now handled by fulfillment intent hotswap
                                     
                                     setTimeout(() => {
                                         close();

@@ -167,6 +167,20 @@ router.get('/api/identity', async (_req, res) => {
     res.json(user);
 });
 
+// Intent endpoint to capture comment content BEFORE purchase
+router.post('/api/payments/intent', async (req, res) => {
+    try {
+        const { content, credits } = req.body;
+        const { userId, postId } = context;
+        if (!userId || !postId) return res.status(401).json({ error: 'Unauthorized' });
+        
+        await redis.set(`pending_tip:${postId}:${userId}`, JSON.stringify({ content, credits }), { ex: 600 });
+        res.json({ ok: true });
+    } catch(e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 router.post('/api/save', async (req, res) => {
     try {
         const { collection, key, value } = req.body;
@@ -528,7 +542,7 @@ router.post('/internal/createPost', async (req, res) => {
     console.log('Creating game post...');
     
     try {
-        const safeTitle = "${title.replace(/"/g, '\\"').replace(/\$/g, '$$')}";
+        const safeTitle = ${JSON.stringify(title)};
         
         // Use the global context object from @devvit/web/server, fallback to headers if needed
         const subredditName = context?.subredditName || req.headers['x-devvit-subreddit-name'];
