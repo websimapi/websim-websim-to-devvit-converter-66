@@ -145,8 +145,8 @@ export const websimStubsJs = `
                                         detail: { sku, credits: tier } 
                                     }));
 
-                                    // If there was also a comment, post it now
-                                    if (data.content && data.content.trim()) {
+                                    // If there was also a custom comment body, post it now
+                                    if (data.content && data.content.trim() && !data.content.includes('Tipped')) {
                                         await originalFetch('/api/comments', {
                                             method: 'POST',
                                             headers: { 'Content-Type': 'application/json' },

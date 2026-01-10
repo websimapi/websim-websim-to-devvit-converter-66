@@ -29,22 +29,36 @@ addPaymentHandler({
             try {
                 const product = order.products && order.products[0];
                 const sku = product ? product.sku : '';
+                const userId = ctx.userId || order.userId;
+                const postId = ctx.postId || order.postId;
                 
                 // SKU format: tip_25_gold
                 const match = sku.match(/tip_(\d+)_gold/);
                 const amount = match ? parseInt(match[1]) : 0;
                 
-                if (amount > 0 && ctx.userId && ctx.postId) {
-                    const tipKey = \`tips:\${ctx.postId}:\${ctx.userId}\`;
+                if (amount > 0 && userId && postId) {
+                    // 1. Update Per-User Running Total (Redis source of truth)
+                    const tipKey = \`tips:\${postId}:\${userId}\`;
                     await ctx.redis.incrBy(tipKey, amount);
-                    
-                    // Automated Thank You Comment
+
+                    // 2. Automated Thank You Comment
                     try {
                         const comment = await ctx.reddit.submitComment({
-                            id: ctx.postId,
-                            text: \`**Tipped \${amount} Gold!** 🟡\\n\\n*(Automated via Devvit Payments)*\`
+                            id: postId,
+                            text: \`**Tipped \${amount} Gold!** 🟡\\n\\n*(Verified Transaction)*\`
                         });
                         
+                        // 3. Register the comment as a tip in Redis registry
+                        // This registry allows /api/comments to dynamically find all tips on a post
+                        const registryKey = \`tips_registry:\${postId}\`;
+                        const meta = JSON.stringify({
+                            comment_id: comment.id,
+                            user_id: userId,
+                            amount: amount,
+                            timestamp: Date.now()
+                        });
+                        await ctx.redis.zAdd(registryKey, { member: meta, score: Date.now() });
+
                         const metaKey = \`comment_metadata:\${comment.id}\`;
                         await ctx.redis.hSet(metaKey, {
                             type: 'tip_comment',
@@ -140,15 +154,15 @@ router.get('/api/payments/history', async (req, res) => {
         if (!userId) return res.json({ purchases: [] });
 
         // Get all historical orders for this user using the server payments SDK
-        // getOrders returns an object: { orders: Order[] }
+        // response can be { orders: [] } or just [] depending on SDK version
         const response = await payments.getOrders({
             userId: userId
-        });
+        }).catch(() => ({ orders: [] }));
 
-        const ordersArray = response?.orders || [];
+        const ordersArray = Array.isArray(response) ? response : (response?.orders || []);
 
         const successfulSkus = ordersArray
-            .filter(o => o && o.status === 'PAID')
+            .filter(o => o && (o.status === 'PAID' || o.status === 1)) // 1 is often PAID enum
             .flatMap(o => (o.products || []).map(p => p.sku));
 
         res.json({ purchases: successfulSkus });
@@ -311,33 +325,33 @@ router.get('/api/comments', async (req, res) => {
 
         const onlyTips = req.query.only_tips === 'true';
 
-        // Get comments from Reddit
+        // 1. Get Official Tips from Registry (Redis Source of Truth)
+        const registryKey = \`tips_registry:\${postId}\`;
+        const registryRaw = await redis.zRange(registryKey, 0, -1);
+        const registeredTips = registryRaw.map(r => {
+            try { return JSON.parse(typeof r === 'string' ? r : r.member); } catch(e) { return null; }
+        }).filter(Boolean);
+
+        // 2. Get comments from Reddit API
         let comments = [];
         try {
-            // reddit.getComments returns a Promise<Listing<Comment>>
             const listing = await reddit.getComments({
                 postId: postId,
                 limit: onlyTips ? 100 : 50
             });
-            // Convert listing to array safely if it's iterable
-            comments = listing || [];
-            if (listing && typeof listing.all === 'function') {
-                 // Some versions of Devvit client expose .all()
-                 comments = await listing.all();
-            }
+            comments = Array.isArray(listing) ? listing : (listing?.all ? await listing.all() : []);
         } catch (e) {
             console.warn('Reddit API getComments failed:', e);
-            comments = [];
         }
 
-        // Transform to WebSim format
+        // 3. Transform & Hot-Swap Data
         let data = await Promise.all(comments.map(async (c) => {
-            // Check for tip metadata
             const metaKey = \`comment_metadata:\${c.id}\`;
             const meta = await redis.hGetAll(metaKey);
+            
+            // Check if this comment is a known tip
             const isTip = meta && meta.type === 'tip_comment';
             
-            // Filter early if we only want tips
             if (onlyTips && !isTip) return null;
 
             return {
@@ -345,15 +359,15 @@ router.get('/api/comments', async (req, res) => {
                     id: c.id,
                     project_id: 'local',
                     raw_content: c.body,
-                    content: { type: 'doc', content: [] }, // simplified structure
+                    content: { type: 'doc', content: [] },
                     author: {
                         id: c.authorId,
                         username: c.authorName,
                         avatar_url: '/_websim_avatar_/' + c.authorName
                     },
                     reply_count: 0, 
-                    created_at: c.createdAt.toISOString(),
-                    parent_comment_id: c.parentId.startsWith('t1_') ? c.parentId : null,
+                    created_at: c.createdAt ? c.createdAt.toISOString() : new Date().toISOString(),
+                    parent_comment_id: c.parentId?.startsWith('t1_') ? c.parentId : null,
                     card_data: isTip ? {
                         type: 'tip_comment',
                         credits_spent: parseInt(meta.credits_spent || '0')
@@ -362,8 +376,29 @@ router.get('/api/comments', async (req, res) => {
             };
         }));
 
-        // Remove filtered items
-        data = data.filter(item => item !== null);
+        // 4. Inject Virtual Tips (Transactions that might be missing from the current page of comments)
+        if (onlyTips) {
+            const existingIds = new Set(data.filter(Boolean).map(item => item.comment.id));
+            registeredTips.forEach(tip => {
+                if (!existingIds.has(tip.comment_id)) {
+                    data.push({
+                        comment: {
+                            id: tip.comment_id,
+                            project_id: 'local',
+                            raw_content: \`**Tipped \${tip.amount} Gold!** 🟡\`,
+                            author: { id: tip.user_id, username: 'RedditUser', avatar_url: '/_websim_avatar_/unknown' },
+                            created_at: new Date(tip.timestamp).toISOString(),
+                            card_data: { type: 'tip_comment', credits_spent: tip.amount }
+                        }
+                    });
+                }
+            });
+        }
+
+        // Filter nulls and sort by date descending
+        data = data.filter(item => item !== null).sort((a,b) => 
+            new Date(b.comment.created_at).getTime() - new Date(a.comment.created_at).getTime()
+        );
 
         res.json({
             comments: {
