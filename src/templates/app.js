@@ -140,11 +140,14 @@ router.get('/api/payments/history', async (req, res) => {
         if (!userId) return res.json({ purchases: [] });
 
         // Get all historical orders for this user using the server payments SDK
-        const orders = await payments.getOrders({
+        // getOrders returns an object: { orders: Order[] }
+        const response = await payments.getOrders({
             userId: userId
         });
 
-        const successfulSkus = (orders || [])
+        const ordersArray = response?.orders || [];
+
+        const successfulSkus = ordersArray
             .filter(o => o && o.status === 'PAID')
             .flatMap(o => (o.products || []).map(p => p.sku));
 
