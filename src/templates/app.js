@@ -174,7 +174,7 @@ router.post('/api/payments/intent', async (req, res) => {
         const { userId, postId } = context;
         if (!userId || !postId) return res.status(401).json({ error: 'Unauthorized' });
         
-        await redis.set(`pending_tip:${postId}:${userId}`, JSON.stringify({ content, credits }), { ex: 600 });
+        await redis.set(\`pending_tip:\${postId}:\${userId}\`, JSON.stringify({ content, credits }), { ex: 600 });
         res.json({ ok: true });
     } catch(e) {
         res.status(500).json({ error: e.message });
