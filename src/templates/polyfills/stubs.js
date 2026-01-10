@@ -32,11 +32,13 @@ export const websimStubsJs = `
                 }
                 
                 const u = getSharedUser() || {
-                    id: 'guest', username: 'Guest', avatar_url: 'https://www.redditstatic.com/avatars/avatar_default_02_FF4500.png'
+                    id: 'guest', username: 'Guest', avatar_url: 'https://www.redditstatic.com/avatars/avatar_default_02_FF4500.png',
+                    total_tipped: 0
                 };
                 
-                // Polyfill camelCase for consistency (Game ports often expect avatarUrl)
+                // Polyfill camelCase and common property names
                 if (u.avatar_url && !u.avatarUrl) u.avatarUrl = u.avatar_url;
+                if (u.total_tipped !== undefined) u.credits = u.total_tipped;
                 
                 return u;
             },

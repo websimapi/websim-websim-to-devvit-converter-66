@@ -281,6 +281,9 @@ export async function generateDevvitZip(projectMeta, assets, includeReadme = tru
         validGoldTiers.forEach(amount => {
             prodFolder.file(`tip_${amount}.png`, iconData);
         });
+
+        // Also provide 'tip_icon.png' for the UI (common in showcase app)
+        assetsFolder.file("tip_icon.png", iconData);
     }
 
     if (hasReact) {

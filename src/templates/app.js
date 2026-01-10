@@ -22,55 +22,13 @@ Devvit.configure({
 });
 
 // --- Payments Handler ---
-// Handles tip_X_gold products
+// This handles native Reddit payments (e.g. via upvote gold)
 addPaymentHandler({
     fulfillOrder: async (order, ctx) => {
-        if (order.status === 'PAID') {
-            try {
-                const product = order.products && order.products[0];
-                const sku = product ? product.sku : '';
-                const userId = ctx.userId || order.userId;
-                const postId = ctx.postId || order.postId;
-                
-                // SKU format: tip_25_gold
-                const match = sku.match(/tip_(\d+)_gold/);
-                const amount = match ? parseInt(match[1]) : 0;
-                
-                if (amount > 0 && userId && postId) {
-                    // 1. Update Per-User Running Total (Redis source of truth)
-                    const tipKey = \`tips:\${postId}:\${userId}\`;
-                    await ctx.redis.incrBy(tipKey, amount);
-
-                    // 2. Automated Thank You Comment
-                    try {
-                        const comment = await ctx.reddit.submitComment({
-                            id: postId,
-                            text: \`**Tipped \${amount} Gold!** 🟡\\n\\n*(Verified Transaction)*\`
-                        });
-                        
-                        // 3. Register the comment as a tip in Redis registry
-                        // This registry allows /api/comments to dynamically find all tips on a post
-                        const registryKey = \`tips_registry:\${postId}\`;
-                        const meta = JSON.stringify({
-                            comment_id: comment.id,
-                            user_id: userId,
-                            amount: amount,
-                            timestamp: Date.now()
-                        });
-                        await ctx.redis.zAdd(registryKey, { member: meta, score: Date.now() });
-
-                        const metaKey = \`comment_metadata:\${comment.id}\`;
-                        await ctx.redis.hSet(metaKey, {
-                            type: 'tip_comment',
-                            credits_spent: String(amount)
-                        });
-                    } catch(err) {
-                        console.warn('Failed to post tip comment:', err);
-                    }
-                }
-            } catch (e) {
-                console.error("Payment Fulfillment Error:", e);
-            }
+        try {
+            await handleOrderFulfillment(order, ctx);
+        } catch (e) {
+            console.error("Payment Fulfillment Error (Native):", e);
         }
     }
 });
@@ -111,10 +69,14 @@ async function fetchAllData() {
         try {
             // Try to get current user from context or Reddit API
             if (context.userId) {
+                const tipKey = `tips:${context.postId}:${context.userId}`;
+                const totalTipped = await redis.get(tipKey);
+
                 user = { 
                     id: context.userId, 
                     username: context.username || 'RedditUser',
-                    avatar_url: user.avatar_url // Default
+                    avatar_url: user.avatar_url, // Default
+                    total_tipped: parseInt(totalTipped || '0')
                 };
             }
             
@@ -122,14 +84,18 @@ async function fetchAllData() {
             const currUser = await reddit.getCurrentUser();
             if (currUser) {
                 const snoovatarUrl = await currUser.getSnoovatarUrl();
+                const tipKey = `tips:${context.postId}:${currUser.id}`;
+                const totalTipped = await redis.get(tipKey);
+
                 user = {
                     id: currUser.id,
                     username: currUser.username,
                     // Use Snoovatar if available, else fallback to standard Reddit static default
-                    avatar_url: snoovatarUrl ?? 'https://www.redditstatic.com/avatars/avatar_default_02_FF4500.png'
+                    avatar_url: snoovatarUrl ?? 'https://www.redditstatic.com/avatars/avatar_default_02_FF4500.png',
+                    total_tipped: parseInt(totalTipped || '0')
                 };
             }
-        } catch(e) { 
+        } catch(e) {
             console.warn('User fetch failed', e); 
         }
 
@@ -245,54 +211,63 @@ router.post('/api/delete', async (req, res) => {
 
 // --- Realtime Relay (Client -> Server -> Clients) ---
 // --- Payments Endpoints (Fulfillment) ---
+async function handleOrderFulfillment(order, ctx) {
+    if (!order || (order.status !== 'PAID' && order.status !== 1)) return;
+
+    const product = order.products && order.products[0];
+    const sku = product ? product.sku : '';
+    const userId = ctx.userId || order.userId;
+    const postId = ctx.postId || order.postId;
+
+    // SKU format: tip_25_gold
+    const match = sku.match(/tip_(\\d+)_gold/);
+    const amount = match ? parseInt(match[1]) : 0;
+
+    if (amount > 0 && userId && postId) {
+        console.log(\`[Server] Processing Tip: \${amount} Gold from \${userId} on \${postId}\`);
+        
+        // 1. Update Per-User Running Total (Redis source of truth)
+        const tipKey = \`tips:\${postId}:\${userId}\`;
+        await redis.incrBy(tipKey, amount);
+
+        // 2. Automated Thank You Comment
+        try {
+            const comment = await reddit.submitComment({
+                id: postId,
+                text: \`**Tipped \${amount} Gold!** 🟡\\n\\n*(Verified Transaction)*\`
+            });
+            
+            // 3. Register the comment as a tip in Redis registry
+            const registryKey = \`tips_registry:\${postId}\`;
+            const meta = JSON.stringify({
+                comment_id: comment.id,
+                user_id: userId,
+                amount: amount,
+                timestamp: Date.now()
+            });
+            await redis.zAdd(registryKey, { member: meta, score: Date.now() });
+
+            const metaKey = \`comment_metadata:\${comment.id}\`;
+            await redis.hSet(metaKey, {
+                type: 'tip_comment',
+                credits_spent: String(amount)
+            });
+        } catch(err) {
+            console.warn('Failed to post tip comment:', err);
+        }
+    }
+}
+
 router.post('/internal/payments/fulfill', async (req, res) => {
     try {
-        // The payment data is passed in the request body.
-        // It's often the order object itself, but we'll check both patterns for robustness.
         const order = req.body.order || req.body;
-        
         if (!order || typeof order !== 'object') {
             return res.status(400).json({ success: false, reason: "Invalid or missing order data" });
         }
 
         console.log(\`[Server] Fulfillment Received: ID=\${order?.id || 'unknown'} Status=\${order?.status || 'unknown'}\`);
-
-        if (order && order.status === 'PAID') {
-            const product = order.products && order.products[0];
-            const sku = product ? product.sku : '';
-            
-            // SKU format: tip_25_gold
-            const match = sku.match(/tip_(\d+)_gold/);
-            const amount = match ? parseInt(match[1]) : 0;
-            
-            // Extract IDs from order if context is not yet hydrated (failsafe)
-            const userId = context.userId || order.userId;
-            const postId = context.postId || order.postId;
-
-            if (amount > 0 && userId && postId) {
-                const tipKey = \`tips:\${postId}:\${userId}\`;
-                await redis.incrBy(tipKey, amount);
-                
-                // Automated Thank You Comment
-                try {
-                    const comment = await reddit.submitComment({
-                        id: postId,
-                        text: \`**Tipped \${amount} Gold!** 🟡\\n\\n*(Automated via Devvit Payments)*\`
-                    });
-                    
-                    const metaKey = \`comment_metadata:\${comment.id}\`;
-                    await redis.hSet(metaKey, {
-                        type: 'tip_comment',
-                        credits_spent: String(amount)
-                    });
-                } catch(err) {
-                    console.warn('Failed to post tip comment:', err);
-                }
-            }
-            return res.json({ success: true });
-        }
-
-        res.json({ success: false, reason: \`Unexpected order status: \${order.status}\` });
+        await handleOrderFulfillment(order, context);
+        res.json({ success: true });
     } catch (e) {
         console.error('Payment Fulfillment Error:', e);
         res.status(500).json({ success: false, reason: e.message });
