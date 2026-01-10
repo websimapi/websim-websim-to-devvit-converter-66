@@ -1,5 +1,4 @@
 export const getMainTs = (title) => {
-    const safeTitle = title.replace(/'/g, "\\'");
     return `
 import express from 'express';
 import { Devvit } from '@devvit/public-api';
@@ -69,7 +68,7 @@ async function fetchAllData() {
         try {
             // Try to get current user from context or Reddit API
             if (context.userId) {
-                const tipKey = `tips:${context.postId}:${context.userId}`;
+                const tipKey = 'tips:' + context.postId + ':' + context.userId;
                 const totalTipped = await redis.get(tipKey);
 
                 user = { 
@@ -84,7 +83,7 @@ async function fetchAllData() {
             const currUser = await reddit.getCurrentUser();
             if (currUser) {
                 const snoovatarUrl = await currUser.getSnoovatarUrl();
-                const tipKey = `tips:${context.postId}:${currUser.id}`;
+                const tipKey = 'tips:' + context.postId + ':' + currUser.id;
                 const totalTipped = await redis.get(tipKey);
 
                 user = {
@@ -538,7 +537,7 @@ router.post('/internal/createPost', async (req, res) => {
         }
 
         const post = await reddit.submitCustomPost({
-            title: '${safeTitle}',
+            title: safeTitle,
             subredditName: subredditName,
             entry: 'default', // matches devvit.json entrypoint
             userGeneratedContent: {
