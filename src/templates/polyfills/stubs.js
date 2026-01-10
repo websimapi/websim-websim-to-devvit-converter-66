@@ -135,6 +135,16 @@ export const websimStubsJs = `
                                      console.log(\`[Polyfill] Adjusting tip amount from \${requested} to nearest Reddit tier: \${tier}\`);
                                 }
 
+                                // Hotswap: Register tip intent BEFORE purchase so server can link content to transaction
+                                await originalFetch('/api/payments/intent', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({
+                                        content: data.content || '',
+                                        credits: tier
+                                    })
+                                }).catch(e => console.warn("[Polyfill] Tip intent failed (non-fatal):", e));
+
                                 const sku = \`tip_\${tier}_gold\`;
                                 const result = await window.purchase(sku);
                                 

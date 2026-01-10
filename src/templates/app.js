@@ -119,15 +119,20 @@ router.get('/api/payments/history', async (req, res) => {
         if (!userId) return res.json({ purchases: [] });
 
         // Get all historical orders for this user using the server payments SDK
-        // response can be { orders: [] } or just [] depending on SDK version
         const response = await payments.getOrders({
             userId: userId
-        }).catch(() => ({ orders: [] }));
+        }).catch(err => {
+            console.warn("[Server] payments.getOrders failed:", err);
+            return { orders: [] };
+        });
 
-        const ordersArray = Array.isArray(response) ? response : (response?.orders || []);
+        // Robust check for orders array
+        let orders = [];
+        if (Array.isArray(response)) orders = response;
+        else if (response && Array.isArray(response.orders)) orders = response.orders;
 
-        const successfulSkus = ordersArray
-            .filter(o => o && (o.status === 'PAID' || o.status === 1)) // 1 is often PAID enum
+        const successfulSkus = orders
+            .filter(o => o && (o.status === 'PAID' || o.status === 1 || o.status === 'SUCCESS'))
             .flatMap(o => (o.products || []).map(p => p.sku));
 
         res.json({ purchases: successfulSkus });
