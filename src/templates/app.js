@@ -528,6 +528,8 @@ router.post('/internal/createPost', async (req, res) => {
     console.log('Creating game post...');
     
     try {
+        const safeTitle = `${title.replace(/"/g, '\\"')}`;
+        
         // Use the global context object from @devvit/web/server, fallback to headers if needed
         const subredditName = context?.subredditName || req.headers['x-devvit-subreddit-name'];
         console.log('Context Subreddit:', subredditName);
